@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """pentefino — async OSINT + recon + perf scanner.
 
-Usage: pentefino.py <domain>
+Usage: pentefino.py <domain> [domain2 ...]
 """
 import asyncio, json, os, re, sys, subprocess, tempfile, shutil
 from pathlib import Path
@@ -294,7 +294,15 @@ def _build_json(r: dict, domain: str, out_json: Path, log):
 
 # ── main orchestrator ─────────────────────────────────────────────
 
-async def scan(domain_raw: str):
+async def scan(domain_raw: str, batch: bool = False) -> dict | None:
+    try:
+        return await _scan(domain_raw, batch)
+    except Exception as e:
+        if not batch:
+            print(f'\033[0;31m❌ {domain_raw}: {e}\033[0m')
+        return None
+
+async def _scan(domain_raw: str, batch: bool = False) -> dict:
     domain = re.sub(r'^https?://', '', domain_raw).split('/')[0]
     report_dir = Path.cwd() / f'report_{domain}'
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -305,7 +313,8 @@ async def scan(domain_raw: str):
 
     out_lines = []
     def log(s='', end='\n'):
-        print(s, end=end)
+        if not batch:
+            print(s, end=end)
         out_lines.append(re.sub(r'\033\[[0-9;]*m', '', s))
 
     log(f'{BO}╔{"═"*50}╗{N}')
@@ -417,13 +426,41 @@ async def scan(domain_raw: str):
     shutil.rmtree(tmpdir, ignore_errors=True)
 
     log(f'\n{BO}╔{"═"*50}╗{N}')
-    log(f'{BO}║  ✅ SCAN CONCLUÍDO{" "*37}║{N}')
+    log(f'{BO}║  ✅ {domain} CONCLUÍDO{" "*34}║{N}')
     log(f'{BO}╚{"═"*50}╝{N}')
+    return results
+
+async def scan_all(domains: list[str]):
+    """Run parallel scans for multiple domains, show aggregate summary."""
+    from time import time
+    t0 = time()
+    log = lambda s='': print(s)
+    log(f'{BO}╔{"═"*50}╗{N}')
+    log(f'{BO}║  PENTEFINO — BATCH SCAN: {len(domains)} domínios{N}')
+    log(f'{BO}╚{"═"*50}╝{N}')
+
+    results = await asyncio.gather(*[scan(d, batch=True) for d in domains])
+
+    ok = sum(1 for r in results if r)
+    elapsed = time() - t0
+    log(f'\n{BO}╔{"═"*50}╗{N}')
+    log(f'{BO}║  ✅ BATCH CONCLUÍDO: {ok}/{len(domains)} domínios em {elapsed:.0f}s     ║{N}')
+    log(f'{BO}╚{"═"*50}╝{N}')
+    for d, r in zip(domains, results):
+        if r:
+            log(f'  📁 report_{r["domain"]}/')
+        else:
+            log(f'  {R}❌ {d}{N}')
+    return results
 
 def main():
     if len(sys.argv) < 2:
-        print(f'Usage: {sys.argv[0]} <domain>', file=sys.stderr); sys.exit(1)
-    asyncio.run(scan(sys.argv[1]))
+        print(f'Usage: {sys.argv[0]} <domain> [domain2 ...]', file=sys.stderr); sys.exit(1)
+    domains = sys.argv[1:]
+    if len(domains) == 1:
+        asyncio.run(scan(domains[0]))
+    else:
+        asyncio.run(scan_all(domains))
 
 if __name__ == '__main__':
     main()

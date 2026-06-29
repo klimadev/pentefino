@@ -1,7 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DOMAIN="${1:?Usage: $0 <domain>}"
+# ── Multi-domain: fork one process per domain ──
+if [ $# -gt 1 ]; then
+  TS="$(date +%Y%m%d_%H%M%S)"
+  for d in "$@"; do
+    "$0" "$d" &
+  done
+  wait
+  echo ""
+  echo -e "${BOLD}╔══════════════════════════════════════════════════╗${N}"
+  echo -e "${BOLD}║  ✅ BATCH CONCLUÍDO: $# domínios                 ║${N}"
+  echo -e "${BOLD}╚══════════════════════════════════════════════════╝${N}"
+  for d in "$@"; do
+    clean="${d#https://}"; clean="${clean#http://}"; clean="${clean%%/*}"
+    echo "  📁 report_${clean}/"
+  done
+  exit 0
+fi
+
+if [ $# -eq 0 ]; then echo "Usage: $0 <domain> [domain2 ...]" >&2; exit 1; fi
+DOMAIN="$1"
 DOMAIN="${DOMAIN#https://}"
 DOMAIN="${DOMAIN#http://}"
 DOMAIN="${DOMAIN%%/*}"
