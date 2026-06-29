@@ -1,0 +1,389 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DOMAIN="${1:?Usage: $0 <domain>}"
+DOMAIN="${DOMAIN#https://}"
+DOMAIN="${DOMAIN#http://}"
+DOMAIN="${DOMAIN%%/*}"
+REPORT="$(pwd)/report_${DOMAIN}"
+TMPDIR="$(mktemp -d /tmp/scan_XXXXXX)"
+TS="$(date +%Y%m%d_%H%M%S)"
+OUT_TXT="${REPORT}/pentefino_${TS}.txt"
+OUT_JSON="${REPORT}/pentefino_${TS}.json"
+OUT_HTML="${REPORT}/pentefino_${TS}.html"
+
+# ANSI colors
+R='\033[0;31m' G='\033[0;32m' Y='\033[0;33m' B='\033[0;34m' N='\033[0m' BOLD='\033[1m'
+
+mkdir -p "$REPORT" && cd "$TMPDIR"
+exec > >(tee -a "${OUT_TXT}") 2>&1
+
+echo -e "${BOLD}╔══════════════════════════════════════════════════╗${N}"
+echo -e "${BOLD}║        PENTEFINO — OSINT + RECON + PERF         ║${N}"
+echo -e "${BOLD}║        ${DOMAIN}"
+echo -e "${BOLD}║        $(date)${N}"
+echo -e "${BOLD}╚══════════════════════════════════════════════════╝${N}"
+
+###########################################################
+# [1] REGISTRATION (RDAP + WHOIS)
+###########################################################
+echo ""
+echo -e "${BOLD}${B}═══ [1] REGISTRO DO DOMÍNIO ═══${N}"
+
+TLD="${DOMAIN##*.}"
+case "$TLD" in com|net) RDAP_URL="https://rdap.verisign.com/${TLD}/v1/domain/${DOMAIN}" ;; org) RDAP_URL="https://rdap.publicinterestregistry.org/rdap/domain/${DOMAIN}" ;; *) RDAP_URL="https://rdap.org/domain/${DOMAIN}" ;; esac
+RDAP_JSON="$(curl -sL --max-time 15 "$RDAP_URL" 2>/dev/null || echo '{}')"
+
+CREATION="$(echo "$RDAP_JSON" | jq -r '[.events[] | select(.eventAction=="registration") | .eventDate] | first // empty' 2>/dev/null || echo '')"
+EXPIRATION="$(echo "$RDAP_JSON" | jq -r '[.events[] | select(.eventAction=="expiration") | .eventDate] | first // empty' 2>/dev/null || echo '')"
+REGISTRAR="$(echo "$RDAP_JSON" | jq -r '[.entities[]? | select(.roles[]?=="registrar") | .vcardArray[1][]? | select(.[0]=="fn") | .[3]] | first // empty' 2>/dev/null || echo '')"
+
+# Registrant via whois (RDAP geralmente só tem registrar)
+WHOIS_RAW="$(timeout 15 whois "$DOMAIN" 2>/dev/null || true)"
+REG_NAME="$(echo "$WHOIS_RAW" | grep -i 'Registrant Name:' | head -1 | sed 's/.*Registrant Name:\s*//i' || true)"
+REG_ORG="$(echo "$WHOIS_RAW" | grep -i 'Registrant Organization:' | head -1 | sed 's/.*Registrant Organization:\s*//i' || true)"
+REG_EMAIL="$(echo "$WHOIS_RAW" | grep -i 'Registrant Email:' | head -1 | sed 's/.*Registrant Email:\s*//i' || true)"
+REG_COUNTRY="$(echo "$WHOIS_RAW" | grep -i 'Registrant Country:' | head -1 | sed 's/.*Registrant Country:\s*//i' || true)"
+
+echo ""
+REG_FALLBACK="$(echo "$WHOIS_RAW" | grep -i 'Registrar:' | head -1 | sed 's/.*Registrar:\s*//i' || true)"
+echo -e "  ${BOLD}Registrar:${N}         ${REGISTRAR:-$REG_FALLBACK}"
+echo -e "  ${BOLD}Titular (registrant):${N} ${REG_NAME:-N/A}"
+echo -e "  ${BOLD}Organização:${N}        ${REG_ORG:-N/A}"
+echo -e "  ${BOLD}País:${N}               ${REG_COUNTRY:-N/A}"
+echo -e "  ${BOLD}E-mail contato:${N}     ${REG_EMAIL:-N/A}"
+echo -e "  ${BOLD}Criação:${N}           ${CREATION:-N/A}"
+echo -e "  ${BOLD}Expiração:${N}          ${EXPIRATION:-N/A}"
+
+###########################################################
+# [2] DNS
+###########################################################
+echo ""
+echo -e "${BOLD}${B}═══ [2] DNS ═══${N}"
+
+A_RECORDS="$(dig +short A "$DOMAIN" 2>/dev/null || true)"
+AAAA_RECORDS="$(dig +short AAAA "$DOMAIN" 2>/dev/null || true)"
+MX_RECORDS="$(dig +short MX "$DOMAIN" 2>/dev/null || true)"
+NS_RECORDS="$(dig +short NS "$DOMAIN" 2>/dev/null || true)"
+TXT_RECORDS="$(dig +short TXT "$DOMAIN" 2>/dev/null || true)"
+SPF="$(echo "$TXT_RECORDS" | grep -i 'v=spf1' || true)"
+DMARC="$(dig +short TXT "_dmarc.${DOMAIN}" 2>/dev/null || true)"
+
+echo -e "  ${BOLD}A:${N}     ${A_RECORDS:-N/A}"
+echo -e "  ${BOLD}AAAA:${N}  ${AAAA_RECORDS:-N/A}"
+echo -e "  ${BOLD}MX:${N}"
+echo "$MX_RECORDS" | sed 's/^/    /'
+echo -e "  ${BOLD}NS:${N}"
+echo "$NS_RECORDS" | sed 's/^/    /'
+echo -e "  ${BOLD}TXT:${N}"
+echo "$TXT_RECORDS" | sed 's/^/    /' | head -10
+echo -e "  ${BOLD}SPF:${N}   $([ -n "$SPF" ] && echo -e "${G}Configurado${N}" || echo -e "${R}Não configurado${N}")"
+echo -e "  ${BOLD}DMARC:${N} $([ -n "$DMARC" ] && echo -e "${G}Configurado${N}" || echo -e "${R}Não configurado${N}")"
+
+# MX provider detection
+MX_PROVIDER="outro"
+if echo "$MX_RECORDS" | grep -qi 'google\.com'; then MX_PROVIDER="Google Workspace"
+elif echo "$MX_RECORDS" | grep -qi 'outlook\|microsoft'; then MX_PROVIDER="Microsoft 365"
+elif echo "$MX_RECORDS" | grep -qi 'cloudflare'; then MX_PROVIDER="Cloudflare"
+elif echo "$MX_RECORDS" | grep -qi 'zoho'; then MX_PROVIDER="Zoho"
+elif echo "$MX_RECORDS" | grep -qi 'protonmail\|proton\.me'; then MX_PROVIDER="ProtonMail"
+fi
+echo -e "  ${BOLD}Provedor MX:${N} ${MX_PROVIDER}"
+
+###########################################################
+# [3] SUBDOMAINS
+###########################################################
+echo ""
+echo -e "${BOLD}${B}═══ [3] SUBDOMÍNIOS ═══${N}"
+SUBDOMAIN_FILE="${TMPDIR}/subdomains.txt"
+subfinder -d "$DOMAIN" -silent -o "$SUBDOMAIN_FILE" 2>/dev/null || true
+SUBDOMAIN_COUNT="$(wc -l < "$SUBDOMAIN_FILE" 2>/dev/null || echo 0)"
+echo -e "  ${BOLD}Encontrados:${N} ${SUBDOMAIN_COUNT}"
+cp "$SUBDOMAIN_FILE" "${REPORT}/subdomains_${DOMAIN}.txt" 2>/dev/null || true
+
+###########################################################
+# [4] STACK FINGERPRINT
+###########################################################
+echo ""
+echo -e "${BOLD}${B}═══ [4] STACK TECNOLÓGICA ═══${N}"
+
+HTTPS_JSON="$(httpx -u "https://${DOMAIN}" -silent -sc -server -td -title -follow-redirects -json 2>/dev/null || echo '{}')"
+echo -e "  ${BOLD}Status:${N}   $(echo "$HTTPS_JSON" | jq -r '.status_code' 2>/dev/null || echo 'N/A')"
+echo -e "  ${BOLD}Título:${N}   $(echo "$HTTPS_JSON" | jq -r '.title // "N/A"' 2>/dev/null)"
+echo -e "  ${BOLD}Servidor:${N} $(echo "$HTTPS_JSON" | jq -r '.webserver // "N/A"' 2>/dev/null)"
+
+CPE="$(echo "$HTTPS_JSON" | jq -r '.cpe[]? | .product + " (" + .vendor + ")"' 2>/dev/null || true)"
+if [ -n "$CPE" ]; then
+  echo -e "  ${BOLD}Framework:${N}"
+  echo "$CPE" | sed 's/^/    ✅ /'
+fi
+
+echo -e "  ${BOLD}whatweb:${N}"
+whatweb "https://${DOMAIN}" --no-errors --color=never 2>/dev/null | sed 's/^/    /'
+
+# Next.js evidence
+echo -e "  ${BOLD}Evidências Next.js:${N}"
+NEXT_HDR="$(curl -sI "https://${DOMAIN}" 2>/dev/null | grep -oi 'x-nextjs-\|x-vercel' | head -1 || true)"
+NEXT_DATA="$(curl -sL "https://${DOMAIN}" 2>/dev/null | grep -oP '__NEXT_DATA__' | head -1 || true)"
+NEXT_STATIC="$(curl -sL "https://${DOMAIN}" 2>/dev/null | grep -oP '/_next/static/[^"\047]+' | head -1 || true)"
+[ -n "$NEXT_HDR" ] && echo -e "    ${G}✅ Headers HTTP${N}" || echo -e "    ${R}❌ Headers HTTP${N}"
+[ -n "$NEXT_DATA" ] && echo -e "    ${G}✅ __NEXT_DATA__ tag${N}" || echo -e "    ${R}❌ __NEXT_DATA__${N}"
+[ -n "$NEXT_STATIC" ] && echo -e "    ${G}✅ /_next/static/ path${N}" || echo -e "    ${R}❌ /_next/static/${N}"
+
+###########################################################
+# [5] AI DETECTION (impeccable)
+###########################################################
+echo ""
+echo -e "${BOLD}${B}═══ [5] DETECÇÃO DE IA ═══${N}"
+HTMLDIR="${TMPDIR}/html"
+mkdir -p "$HTMLDIR"
+curl -sL --max-time 15 "https://${DOMAIN}" -o "${HTMLDIR}/index.html" 2>/dev/null || true
+[ ! -s "${HTMLDIR}/index.html" ] && curl -sL --max-time 15 "https://www.${DOMAIN}" -o "${HTMLDIR}/index.html" 2>/dev/null || true
+
+grep -oP 'src="([^"]+\.js[^"]*)"' "${HTMLDIR}/index.html" 2>/dev/null | while read -r match; do
+  u=$(echo "$match" | sed 's/src="//;s/"//')
+  case "$u" in http*) ;; /*) u="https://${DOMAIN}${u}" ;; *) u="https://${DOMAIN}/${u}" ;; esac
+  curl -sL --max-time 10 "$u" -o "${HTMLDIR}/$(basename "${u%%\?*}" 2>/dev/null || echo 'app.js')" 2>/dev/null || true
+done
+
+echo -e "  ${BOLD}HTML:${N} $(stat -c%s "${HTMLDIR}/index.html" 2>/dev/null || echo 0) bytes"
+echo -e "  ${BOLD}JS baixados:${N} $(find "$HTMLDIR" -name '*.js' -size +0 2>/dev/null | wc -l)"
+echo -e "  ${BOLD}Scan:${N} impeccable detect (file-only com timeout 10s)"
+IMPC_TOTAL=0
+while IFS= read -r f; do
+  sz=$(stat -c%s "$f" 2>/dev/null || echo 0); [ "$sz" -gt 2097152 ] && continue
+  json="$(timeout 10 npx --yes impeccable detect --json "$f" 2>/dev/null)" || json='[]'
+  c=$(echo "$json" | jq '. | length' 2>/dev/null || echo 0)
+  [ "$c" -gt 0 ] && IMPC_TOTAL=$((IMPC_TOTAL + c))
+done < <(find "$HTMLDIR" -type f -size +0 | head -20 2>/dev/null)
+
+if [ "$IMPC_TOTAL" -gt 0 ]; then
+  echo -e "    ${Y}⚠️  ${IMPC_TOTAL} padrões IA encontrados nos arquivos estáticos${N}"
+else
+  echo -e "    - Nenhum padrão detectado (arquivos estáticos)"
+  echo -e "    ${Y}💡 Para scan completo via URL (precisa Puppeteer): npx impeccable detect --json https://\$DOMAIN${N}"
+fi
+
+###########################################################
+# [6] PERFORMANCE (Lighthouse Mobile + Desktop)
+###########################################################
+echo ""
+echo -e "${BOLD}${B}═══ [6] PERFORMANCE ═══${N}"
+
+run_lighthouse() {
+  local strategy="$1" outfile="$2"
+  echo -e "  ${BOLD}Rodando Lighthouse (${strategy})...${N}"
+  local preset=""
+  [ "$strategy" = "desktop" ] && preset="--preset=desktop"
+  npx --yes lighthouse "https://${DOMAIN}" \
+    --output json --output-path "$outfile" \
+    --chrome-flags="--no-sandbox --headless" \
+    --quiet ${preset} 2>/dev/null || true
+}
+
+LH_MOBILE="${TMPDIR}/lh_mobile.json"
+LH_DESKTOP="${TMPDIR}/lh_desktop.json"
+
+run_lighthouse "mobile" "$LH_MOBILE"
+run_lighthouse "desktop" "$LH_DESKTOP"
+
+print_lh_results() {
+  local label="$1" file="$2"
+  [ ! -s "$file" ] && return
+  local perf cat a11y bp seo
+  perf=$(cat "$file" | jq '(.categories.performance.score // 0) * 100 | floor' 2>/dev/null || echo 0)
+  a11y=$(cat "$file" | jq '(.categories.accessibility.score // 0) * 100 | floor' 2>/dev/null || echo 0)
+  bp=$(cat "$file" | jq '(.categories["best-practices"].score // 0) * 100 | floor' 2>/dev/null || echo 0)
+  seo=$(cat "$file" | jq '(.categories.seo.score // 0) * 100 | floor' 2>/dev/null || echo 0)
+  local lcp cls tbt fcp si
+  lcp=$(cat "$file" | jq '.audits["largest-contentful-paint"].numericValue // 0' 2>/dev/null || echo 0)
+  cls=$(cat "$file" | jq '.audits["cumulative-layout-shift"].numericValue // 0' 2>/dev/null || echo 0)
+  tbt=$(cat "$file" | jq '.audits["total-blocking-time"].numericValue // 0' 2>/dev/null || echo 0)
+  fcp=$(cat "$file" | jq '.audits["first-contentful-paint"].numericValue // 0' 2>/dev/null || echo 0)
+  si=$(cat "$file" | jq '.audits["speed-index"].numericValue // 0' 2>/dev/null || echo 0)
+
+  local clr_perf clr_cwv
+  [ "$perf" -ge 90 ] && clr_perf="${G}" || [ "$perf" -ge 50 ] && clr_perf="${Y}" || clr_perf="${R}"
+  local lcp_s=$(echo "scale=1; $lcp / 1000" | bc -l 2>/dev/null || echo "0.0")
+  local tbt_ms=$(echo "scale=0; $tbt / 1" | bc 2>/dev/null || echo "0")
+  local fcp_s=$(echo "scale=1; $fcp / 1000" | bc -l 2>/dev/null || echo "0.0")
+  local si_s=$(echo "scale=1; $si / 1000" | bc -l 2>/dev/null || echo "0.0")
+  # bc nao prefixa 0.x -> forca via printf
+  lcp_s=$(printf '%.1f' "$lcp_s" 2>/dev/null || echo "0.0")
+  fcp_s=$(printf '%.1f' "$fcp_s" 2>/dev/null || echo "0.0")
+  si_s=$(printf '%.1f' "$si_s" 2>/dev/null || echo "0.0")
+
+  local e_perf="✅"; [ "$perf" -lt 90 ] && e_perf="⚠️"; [ "$perf" -lt 50 ] && e_perf="❌"
+  local e_a11y="✅"; [ "$a11y" -lt 90 ] && e_a11y="⚠️"; [ "$a11y" -lt 50 ] && e_a11y="❌"
+  local e_bp="✅";   [ "$bp" -lt 90 ]   && e_bp="⚠️";   [ "$bp" -lt 50 ]   && e_bp="❌"
+  local e_seo="✅";  [ "$seo" -lt 90 ]  && e_seo="⚠️";  [ "$seo" -lt 50 ]  && e_seo="❌"
+
+  echo ""
+  echo -e "  ${BOLD}━━━ ${label} ━━━${N}"
+  echo -e "  ${BOLD}Scores:${N}"
+  echo -e "    $(pct_color $perf)${perf}%${N} $e_perf Performance"
+  echo -e "    $(pct_color $a11y)${a11y}%${N} $e_a11y Acessibilidade"
+  echo -e "    $(pct_color $bp)${bp}%${N} $e_bp Boas Práticas"
+  echo -e "    $(pct_color $seo)${seo}%${N} $e_seo SEO"
+  echo ""
+  echo -e "  ${BOLD}Core Web Vitals (lab):${N}"
+  lcp_s=$(printf '%.1f' "$(echo "scale=1; $lcp / 1000" | bc -l 2>/dev/null || echo 0.0)" 2>/dev/null)
+  local e_lcp="✅"; local e_cls="✅"; local e_tbt="✅"
+  [ "$(echo "$lcp > 2500" | bc -l 2>/dev/null)" -eq 1 ] && e_lcp="⚠️"
+  [ "$(echo "$lcp > 4000" | bc -l 2>/dev/null)" -eq 1 ] && e_lcp="❌"
+  [ "$(echo "$cls > 0.1" | bc -l 2>/dev/null)" -eq 1 ] && e_cls="⚠️"
+  [ "$(echo "$cls > 0.25" | bc -l 2>/dev/null)" -eq 1 ] && e_cls="❌"
+  [ "$(echo "$tbt > 200" | bc -l 2>/dev/null)" -eq 1 ] && e_tbt="⚠️"
+  [ "$(echo "$tbt > 600" | bc -l 2>/dev/null)" -eq 1 ] && e_tbt="❌"
+  echo -e "    LCP $e_lcp — ${lcp_s}s (ideal < 2.5s)"
+  echo -e "    CLS $e_cls — $cls (ideal < 0.1)"
+  echo -e "    TBT $e_tbt — ${tbt_ms}ms (ideal < 200ms)"
+  echo -e "    FCP — ${fcp_s}s"
+  echo -e "    Speed Index — ${si_s}s"
+}
+
+score_label() { [ "$1" -ge 90 ] && echo "✅" || [ "$1" -ge 50 ] && echo "⚠️" || echo "❌"; }
+
+pct_color() {
+  if [ "$1" -ge 90 ]; then printf '%s' "${G}"
+  elif [ "$1" -ge 50 ]; then printf '%s' "${Y}"
+  else printf '%s' "${R}"; fi
+}
+
+bcmp() { echo "$1" | bc -l 2>/dev/null || echo 0; }
+cwp_label() {
+  local val="$1" metric="$2"
+  case "$metric" in
+    lcp) (( $(echo "$val < 2500" | bc -l 2>/dev/null || echo 0) )) && echo -e "${G}✅${N}" || (( $(echo "$val < 4000" | bc -l 2>/dev/null || echo 0) )) && echo -e "${Y}⚠️${N}" || echo -e "${R}❌${N}" ;;
+    cls) (( $(echo "$val < 0.1" | bc -l 2>/dev/null || echo 0) )) && echo -e "${G}✅${N}" || (( $(echo "$val < 0.25" | bc -l 2>/dev/null || echo 0) )) && echo -e "${Y}⚠️${N}" || echo -e "${R}❌${N}" ;;
+    tbt) (( $(echo "$val < 200" | bc -l 2>/dev/null || echo 0) )) && echo -e "${G}✅${N}" || (( $(echo "$val < 600" | bc -l 2>/dev/null || echo 0) )) && echo -e "${Y}⚠️${N}" || echo -e "${R}❌${N}" ;;
+  esac
+}
+
+print_lh_results "MOBILE" "$LH_MOBILE"
+print_lh_results "DESKTOP" "$LH_DESKTOP"
+
+# Extract for JSON
+extract_lh() { cat "$1" 2>/dev/null | jq "$2" 2>/dev/null || echo null; }
+
+###########################################################
+# [7] EXECUTIVE SUMMARY (humanized)
+###########################################################
+echo ""
+echo -e "${BOLD}${B}═══════════════════════════════════════════════════${N}"
+echo -e "${BOLD}${B}   📋 RESUMO EXECUTIVO — ${DOMAIN}${N}"
+echo -e "${BOLD}${B}═══════════════════════════════════════════════════${N}"
+
+issues=0
+print_issue() { local icon="$1" msg="$2"; echo -e "  ${icon} ${msg}"; issues=$((issues + 1)); }
+
+echo ""
+echo -e "  ${BOLD}🏢 Registro${N}"
+echo -e "    Titular: ${REG_NAME:-N/A} (${REG_ORG:-N/A})"
+echo -e "    Registrado em: ${CREATION:-N/A} | Expira: ${EXPIRATION:-N/A}"
+
+echo ""
+echo -e "  ${BOLD}🌐 DNS / Infra${N}"
+echo -e "    IP: ${A_RECORDS:-N/A} | MX: ${MX_PROVIDER}"
+echo -e "    Hospedagem: $(echo "$HTTPS_JSON" | jq -r '.webserver // "N/A"' 2>/dev/null)"
+[ -z "$DMARC" ] && print_issue "${R}❌${N}" "${BOLD}DMARC não configurado${N} — vulnerável a spoofing de e-mail"
+[ -n "$SPF" ] && print_issue "${G}✅${N}" "${BOLD}SPF configurado${N}"
+
+echo ""
+echo -e "  ${BOLD}🥞 Stack${N}"
+echo -e "    $(echo "$CPE" | head -1 || echo 'Framework: Não identificado')"
+echo -e "    Subdomínios: ${SUBDOMAIN_COUNT} encontrados"
+
+echo ""
+echo -e "  ${BOLD}⚡ Performance (Mobile vs Desktop)${N}"
+for mode in mobile desktop; do
+  [ "$mode" = "mobile" ] && f="$LH_MOBILE" || f="$LH_DESKTOP"
+  [ ! -s "$f" ] && continue
+  p=$(cat "$f" | jq '(.categories.performance.score // 0) * 100 | floor' 2>/dev/null || echo 0)
+  l=$(cat "$f" | jq '.audits["largest-contentful-paint"].numericValue // 0' 2>/dev/null || echo 0)
+  ls=$(echo "scale=1; $l / 1000" | bc 2>/dev/null || echo "?")
+  [ "$p" -lt 90 ] && print_issue "${Y}⚠️${N}" "${BOLD}${mode^}: Performance ${p}%${N} (LCP ${ls}s)"
+done
+
+echo ""
+echo -e "  ${BOLD}🔍 Recomendações:${N}"
+[ -z "$DMARC" ] && echo -e "    • ${R}CRÍTICO${N}: Configure DMARC (ex: v=DMARC1; p=quarantine; rua=mailto:dmarc@${DOMAIN})"
+lcp_mobile=$(extract_lh "$LH_MOBILE" '.audits["largest-contentful-paint"].numericValue // 0' 2>/dev/null || echo 0)
+lcp_round=$(printf '%.0f' "$lcp_mobile" 2>/dev/null || echo "$lcp_mobile")
+[ "$(echo "$lcp_mobile > 2500" | bc -l 2>/dev/null || echo 0)" -eq 1 ] && echo -e "    • ${Y}LENTO${N}: LCP mobile alto (${lcp_round}ms). Otimizar imagens, reduzir JS, usar caching CDN"
+[ -n "$REG_EMAIL" ] && [[ "$REG_EMAIL" == *"wix-domains"* ]] && echo -e "    • ${Y}ATENÇÃO${N}: E-mail de contato via Wix (privacidade WHOIS). E-mail real pode estar oculto"
+echo -e "    • ${B}INFO${N}: ${SUBDOMAIN_COUNT} subdomínios mapeados — revisar cada um para shadow IT"
+echo -e "    • ${B}INFO${N}: Criar relatório contínuo: $(basename "$0") ${DOMAIN} > relatorio_semanal.txt"
+
+echo ""
+echo -e "${BOLD}${B}═══════════════════════════════════════════════════${N}"
+
+###########################################################
+# [8] AGGREGATE JSON
+###########################################################
+echo ""
+echo -e "${BOLD}${B}═══ [8] REPORT ═══${N}"
+
+cat > "${OUT_JSON}" <<EOF
+{
+  "scan": {
+    "domain": "${DOMAIN}",
+    "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+    "tool": "pentefino.sh"
+  },
+  "registration": {
+    "registrar": $(printf '%s' "${REGISTRAR:-}" | jq -Rs 'if length==0 then null else . end' 2>/dev/null || echo null),
+    "registrant_name": $(printf '%s' "${REG_NAME:-}" | jq -Rs 'if length==0 then null else . end' 2>/dev/null || echo null),
+    "registrant_org": $(printf '%s' "${REG_ORG:-}" | jq -Rs 'if length==0 then null else . end' 2>/dev/null || echo null),
+    "registrant_email": $(printf '%s' "${REG_EMAIL:-}" | jq -Rs 'if length==0 then null else . end' 2>/dev/null || echo null),
+    "registrant_country": $(printf '%s' "${REG_COUNTRY:-}" | jq -Rs 'if length==0 then null else . end' 2>/dev/null || echo null),
+    "creation_date": $(printf '%s' "${CREATION:-}" | jq -Rs 'if length==0 then null else . end' 2>/dev/null || echo null),
+    "expiration_date": $(printf '%s' "${EXPIRATION:-}" | jq -Rs 'if length==0 then null else . end' 2>/dev/null || echo null)
+  },
+  "dns": {
+    "a": $(echo "$A_RECORDS" | jq -R -s 'split("\n") | map(select(length>0))' 2>/dev/null || echo '[]'),
+    "aaaa": $(echo "$AAAA_RECORDS" | jq -R -s 'split("\n") | map(select(length>0))' 2>/dev/null || echo '[]'),
+    "mx": $(echo "$MX_RECORDS" | jq -R -s 'split("\n") | map(select(length>0))' 2>/dev/null || echo '[]'),
+    "ns": $(echo "$NS_RECORDS" | jq -R -s 'split("\n") | map(select(length>0))' 2>/dev/null || echo '[]'),
+    "txt": $(echo "$TXT_RECORDS" | jq -R -s 'split("\n") | map(select(length>0))' 2>/dev/null || echo '[]'),
+    "spf": $(printf '%s' "${SPF:-}" | jq -Rs 'if length==0 then null else . end' 2>/dev/null || echo null),
+    "dmarc": $(printf '%s' "${DMARC:-}" | jq -Rs 'if length==0 then null else . end' 2>/dev/null || echo null),
+    "mx_provider": "$MX_PROVIDER"
+  },
+  "subdomains": {
+    "count": ${SUBDOMAIN_COUNT},
+    "file": "${REPORT}/subdomains_${DOMAIN}.txt"
+  },
+  "stack": {
+    "raw_cpe": $(echo "$HTTPS_JSON" | jq '.cpe // []' 2>/dev/null || echo '[]'),
+    "tech": $(echo "$HTTPS_JSON" | jq '.tech // []' 2>/dev/null || echo '[]'),
+    "webserver": $(echo "$HTTPS_JSON" | jq '.webserver // ""' 2>/dev/null || echo '""'),
+    "title": $(echo "$HTTPS_JSON" | jq '.title // ""' 2>/dev/null || echo '""'),
+    "nextjs_proven": $(echo "$NEXT_HDR$NEXT_DATA$NEXT_STATIC" | grep -q . && echo true || echo false)
+  },
+  "performance": {
+    "mobile": {
+      "lh_scores": $(cat "$LH_MOBILE" 2>/dev/null | jq '{performance: (.categories.performance.score // 0) * 100 | floor, accessibility: (.categories.accessibility.score // 0) * 100 | floor, best_practices: (.categories["best-practices"].score // 0) * 100 | floor, seo: (.categories.seo.score // 0) * 100 | floor}' 2>/dev/null || echo 'null'),
+      "cwv": $(cat "$LH_MOBILE" 2>/dev/null | jq '{lcp_ms: .audits["largest-contentful-paint"].numericValue, cls: .audits["cumulative-layout-shift"].numericValue, tbt_ms: .audits["total-blocking-time"].numericValue, fcp_ms: .audits["first-contentful-paint"].numericValue}' 2>/dev/null || echo 'null')
+    },
+    "desktop": {
+      "lh_scores": $(cat "$LH_DESKTOP" 2>/dev/null | jq '{performance: (.categories.performance.score // 0) * 100 | floor, accessibility: (.categories.accessibility.score // 0) * 100 | floor, best_practices: (.categories["best-practices"].score // 0) * 100 | floor, seo: (.categories.seo.score // 0) * 100 | floor}' 2>/dev/null || echo 'null'),
+      "cwv": $(cat "$LH_DESKTOP" 2>/dev/null | jq '{lcp_ms: .audits["largest-contentful-paint"].numericValue, cls: .audits["cumulative-layout-shift"].numericValue, tbt_ms: .audits["total-blocking-time"].numericValue, fcp_ms: .audits["first-contentful-paint"].numericValue}' 2>/dev/null || echo 'null')
+    }
+  }
+}
+EOF
+
+echo -e "  ${G}JSON:${N} ${OUT_JSON}"
+echo -e "  ${G}TXT:${N}  ${OUT_TXT}"
+echo -e "  ${G}Sub:${N}  ${REPORT}/subdomains_${DOMAIN}.txt"
+
+# CLEANUP
+cd / && rm -rf "$TMPDIR"
+echo -e "  Temp removido"
+
+echo ""
+echo -e "${BOLD}╔══════════════════════════════════════════════════╗${N}"
+echo -e "${BOLD}║  ✅ SCAN CONCLUÍDO                              ║${N}"
+echo -e "${BOLD}║  ${issues} pontos de atenção identificados          ║${N}"
+echo -e "${BOLD}╚══════════════════════════════════════════════════╝${N}"
