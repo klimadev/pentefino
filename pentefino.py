@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""pentefino — async OSINT + recon + perf scanner.
+"""pentefino — async OSINT + recon + perf + visual critique scanner.
 
-Usage: pentefino.py <domain> [domain2 ...]
+Usage: pentefino.py [-v] <domain> [domain2 ...]
+   -v, --visual-critique  enable visual design critique (Gemini Vision)
 """
-import asyncio, json, os, re, sys, subprocess, tempfile, shutil
+import asyncio, json, os, re, sys, subprocess, tempfile, shutil, argparse
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 
 R,G,Y,B,N,BO='\033[0;31m','\033[0;32m','\033[0;33m','\033[0;34m','\033[0m','\033[1m'
 
@@ -37,13 +38,15 @@ async def curl_head(url: str) -> str:
 # ── scan modules ──────────────────────────────────────────────────
 
 async def scan_registration(domain: str) -> dict:
-    tld = domain.split('.')[-1]
+    # RDAP/WHOIS only works on registered domains, not subdomains like www
+    reg_domain = re.sub(r'^www\d?\.', '', domain)
+    tld = reg_domain.split('.')[-1]
     if tld in ('com','net'):
-        rdap_url = f'https://rdap.verisign.com/{tld}/v1/domain/{domain}'
+        rdap_url = f'https://rdap.verisign.com/{tld}/v1/domain/{reg_domain}'
     elif tld == 'org':
-        rdap_url = 'https://rdap.publicinterestregistry.org/rdap/domain/' + domain
+        rdap_url = 'https://rdap.publicinterestregistry.org/rdap/domain/' + reg_domain
     else:
-        rdap_url = 'https://rdap.org/domain/' + domain
+        rdap_url = 'https://rdap.org/domain/' + reg_domain
 
     rdap_raw = await curl(rdap_url)
     rdap = json.loads(rdap_raw) if rdap_raw else {}
@@ -55,33 +58,33 @@ async def scan_registration(domain: str) -> dict:
             if role in ent.get('roles', []):
                 va = ent.get('vcardArray', [])
                 if len(va) < 2 or not va[1]: continue
-                vcard = va[1][0] if isinstance(va[1], list) and len(va[1]) > 0 else []
-                for row in vcard:
+                for row in va[1]:
                     if isinstance(row, list) and len(row) > 3 and row[0] == 'fn':
                         return row[3]
         return ''
 
     rdap_registrar = _vc('registrar')
     rdap_name = _vc('registrant')
-    rdap_org = _vc('registrant')
+    rdap_org = ''
     rdap_email = ''
+    rdap_country = ''
 
-    # fallback: try extracting all entity fields if per-role fails
+    # fallback: scan all vcard properties in all entities
     if not any([rdap_registrar, rdap_name]):
         for ent in rdap.get('entities', []):
             va = ent.get('vcardArray', [])
             if len(va) < 2 or not va[1]: continue
-            vcard = va[1][0] if isinstance(va[1], list) and len(va[1]) > 0 else []
-            for row in vcard:
-                if isinstance(row, list) and len(row) > 3:
-                    if row[0] == 'fn' and not rdap_registrar and 'registrar' in ent.get('roles', []):
-                        rdap_registrar = row[3]
-                    if row[0] == 'fn' and not rdap_name:
-                        rdap_name = row[3]
-                    if row[0] == 'email':
-                        rdap_email = row[3]
+            for row in va[1]:
+                if not isinstance(row, list) or len(row) < 4: continue
+                key, val = row[0], row[3]
+                if key == 'fn' and not rdap_registrar and not rdap_name:
+                    rdap_registrar = rdap_name = val
+                elif key == 'org' and not rdap_org:
+                    rdap_org = val
+                elif key == 'email' and not rdap_email:
+                    rdap_email = val
 
-    whois_raw = await sh('timeout 15 whois ' + domain, 20)
+    whois_raw = await sh('timeout 15 whois ' + reg_domain, 20)
     def wg(patterns: list) -> str:
         for p in patterns:
             m = re.search(rf'{p}:\s*(.*)', whois_raw, re.I | re.M)
@@ -213,6 +216,72 @@ async def scan_perf(domain: str, strategy: str, tmpdir: Path) -> dict:
                          tbt_ms=ga('total-blocking-time'), fcp_ms=ga('first-contentful-paint'),
                          si_ms=ga('speed-index')))
 
+# ── visual critique (optional) ───────────────────────────────────
+
+async def scan_visual(domain: str, tmpdir: Path, log: Any = print) -> dict | None:
+    """Full-page screenshot → Gemini Vision → structured design critique.
+    Returns None if screenshot or API call fails.
+    """
+    from google import genai
+    from google.genai import types
+
+    # take full-page screenshot with Playwright (headless, cross-platform)
+    try:
+        from playwright.async_api import async_playwright
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=True)
+            page = await browser.new_page(viewport={"width": 1280, "height": 720})
+            await page.goto(f'https://{domain}', wait_until='networkidle', timeout=30000)
+            out = tmpdir / 'screenshot.png'
+            await page.screenshot(path=str(out), full_page=True)
+            await browser.close()
+        if not out.exists() or out.stat().st_size == 0:
+            return None
+    except Exception as e:
+        log(f'  {Y}⚠️ Screenshot failed: {e}{N}')
+        return None
+
+    # send to Gemini Vision API
+    try:
+        client = genai.Client(api_key='GEMINI_API_KEY_EM_ENV_VAR')
+        prompt = (
+            'You are a senior UI/UX design critic. Analyze this full-page website screenshot.\n'
+            'Return ONLY a valid JSON object (no markdown, no code fences):\n'
+            '{\n'
+            '  "design_quality": <1-10 integer>,\n'
+            '  "layout": "detailed layout critique — spacing, alignment, visual hierarchy, use of whitespace",\n'
+            '  "colors": "color palette critique — contrast, accessibility, brand alignment, visual appeal",\n'
+            '  "typography": "font choices, readability, hierarchy, line lengths, sizing",\n'
+            '  "consistency": "visual consistency — reusable components, spacing rhythm, brand coherence",\n'
+            '  "mobile_friendly": true/false,\n'
+            '  "issues_found": <integer count>,\n'
+            '  "key_issues": ["specific issue 1", "specific issue 2", ...],\n'
+            '  "recommendations": ["specific actionable fix 1", "specific actionable fix 2", ...]\n'
+            '}\n'
+            'Be honest, critical, and specific. Reference concrete visual elements.'
+        )
+        img_bytes = out.read_bytes()
+        response = client.models.generate_content(
+            model='gemini-3.1-flash-lite',
+            contents=[prompt, types.Part.from_bytes(data=img_bytes, mime_type='image/png')],
+        )
+        text = response.text.strip()
+        # strip possible markdown fences
+        text = re.sub(r'^```(?:json)?\s*', '', text)
+        text = re.sub(r'\s*```$', '', text)
+        return json.loads(text)
+    except Exception as e:
+        log(f'  {Y}⚠️ Visual critique failed: {e}{N}')
+        return None
+
+async def scan_impeccable(domain: str) -> list:
+    """Run impeccable design anti-pattern detector. Returns list of findings."""
+    url = f'https://{domain}'
+    out = await sh(f'CI=1 npx --yes impeccable detect --json {url} 2>/dev/null', 60)
+    if not out: return []
+    try: return json.loads(out)
+    except: return []
+
 # ── output helpers ────────────────────────────────────────────────
 
 def _print_lh(log, label: str, data: dict):
@@ -261,6 +330,14 @@ def _print_summary(r: dict, log):
         p = perf.get(mode,{}).get('scores',{}).get('performance',0)
         lcp = perf.get(mode,{}).get('cwv',{}).get('lcp_ms',0)
         if p and p < 90: issue(f'{Y}⚠️{N}',f'{BO}{mode.title()}: Performance {p}%{N} (LCP {lcp/1000:.1f}s)')
+    vc = r.get('visual_critique')
+    if vc and vc.get('design_quality'):
+        dq = vc['design_quality']
+        if dq < 5: issue(f'{R}🎨{N}',f'{BO}Design visual: {dq}/10{N} — revisar layout/UI')
+        log(f'\n  {BO}🎨 Design Visual{N}')
+        log(f'    Qualidade: {dq}/10')
+        if vc.get('key_issues'):
+            for iss in vc['key_issues'][:3]: log(f'    • {iss}')
     log(f'\n  {BO}🔍 Recomendações:{N}')
     if not dns.get('dmarc'): log(f'    • {R}CRÍTICO{N}: Configure DMARC')
     lcp_m = perf.get('mobile',{}).get('cwv',{}).get('lcp_ms',0)
@@ -289,20 +366,26 @@ def _build_json(r: dict, domain: str, out_json: Path, log):
         performance=dict(
             mobile=dict(lh_scores=perf.get('mobile',{}).get('scores'), cwv=perf.get('mobile',{}).get('cwv')),
             desktop=dict(lh_scores=perf.get('desktop',{}).get('scores'), cwv=perf.get('desktop',{}).get('cwv'))))
+    vc = r.get('visual_critique')
+    if vc:
+        data['visual_critique'] = vc
+    imp = r.get('impeccable')
+    if imp:
+        data['impeccable'] = dict(findings=imp, count=len(imp))
     out_json.write_text(json.dumps(data, indent=2))
     log(f'  {G}JSON:{N} {out_json}')
 
 # ── main orchestrator ─────────────────────────────────────────────
 
-async def scan(domain_raw: str, batch: bool = False) -> dict | None:
+async def scan(domain_raw: str, batch: bool = False, visual: bool = False) -> dict | None:
     try:
-        return await _scan(domain_raw, batch)
+        return await _scan(domain_raw, batch, visual)
     except Exception as e:
         if not batch:
             print(f'\033[0;31m❌ {domain_raw}: {e}\033[0m')
         return None
 
-async def _scan(domain_raw: str, batch: bool = False) -> dict:
+async def _scan(domain_raw: str, batch: bool = False, visual: bool = False) -> dict:
     domain = re.sub(r'^https?://', '', domain_raw).split('/')[0]
     report_dir = Path.cwd() / f'report_{domain}'
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -334,10 +417,15 @@ async def _scan(domain_raw: str, batch: bool = False) -> dict:
         html=asyncio.create_task(fetch_html(domain), name='html'),
         perf_mobile=asyncio.create_task(scan_perf(domain, 'mobile', tmpdir), name='lh-m'),
         perf_desktop=asyncio.create_task(scan_perf(domain, 'desktop', tmpdir), name='lh-d'),
+        impeccable=asyncio.create_task(scan_impeccable(domain), name='impeccable'),
     )
+    if visual:
+        tasks['visual'] = asyncio.create_task(scan_visual(domain, tmpdir, log=log), name='vis')
     labels = dict(registration='Registro (RDAP + WHOIS)', dns='DNS', subdomains='Subdomínios',
                   stack='Stack', html='HTML', perf_mobile='⚡ Performance (Mobile)',
-                  perf_desktop='⚡ Performance (Desktop)')
+                  perf_desktop='⚡ Performance (Desktop)', impeccable='🔍 Design (impeccable)')
+    if visual:
+        labels['visual'] = '🎨 Crítica Visual'
     for lbl in labels.values(): log(f'  ⏳ {lbl}')
 
     # ── [1] Registration ──
@@ -412,13 +500,59 @@ async def _scan(domain_raw: str, batch: bool = False) -> dict:
     _print_lh(log, 'MOBILE', perf_m)
     _print_lh(log, 'DESKTOP', perf_d)
 
-    # ── [7] Executive Summary ──
+    # ── [7] Impeccable Design Check ──
+    log(f'\n{BO}{B}═══ [7] DESIGN CHECK (impeccable) ═══{N}')
+    imp = await tasks['impeccable']
+    if imp and len(imp):
+        warn = sum(1 for f in imp if f.get('severity') == 'warning')
+        adv = sum(1 for f in imp if f.get('severity') == 'advisory')
+        log(f'  {BO}Total:{N} {len(imp)} problemas ({warn} warnings, {adv} advisories)')
+        # group by antipattern
+        by_ap: dict[str, list] = {}
+        for f in imp:
+            ap = f.get('antipattern') or '?'
+            by_ap.setdefault(ap, []).append(f)
+        for ap, items in sorted(by_ap.items()):
+            name = items[0].get('name', ap)
+            sv = items[0].get('severity', 'info')
+            ico = '⚠️' if sv == 'warning' else 'ℹ️'
+            log(f'  {ico} {name} ({len(items)})')
+            if items[0].get('snippet'):
+                log(f'      Ex: {items[0]["snippet"]}')
+    else:
+        log(f'  {G}✅ Nenhum problema de design detectado{N}')
+
+    # ── [8] Visual Critique (opcional) ──
+    vis = tasks.get('visual')
+    if vis:
+        vis = await vis
+        log(f'\n{BO}{B}═══ [7] CRÍTICA VISUAL ═══{N}')
+        if vis and vis.get('design_quality'):
+            dq = vis['design_quality']
+            log(f'  {BO}Qualidade de Design:{N} {dq}/10 {"✅" if dq >= 7 else "⚠️" if dq >= 4 else "❌"}')
+            if vis.get('layout'): log(f'  {BO}Layout:{N} {vis["layout"]}')
+            if vis.get('colors'): log(f'  {BO}Cores:{N} {vis["colors"]}')
+            if vis.get('typography'): log(f'  {BO}Tipografia:{N} {vis["typography"]}')
+            if vis.get('consistency'): log(f'  {BO}Consistência:{N} {vis["consistency"]}')
+            log(f'  {BO}Mobile-friendly:{N} {"✅ Sim" if vis.get("mobile_friendly") else "❌ Não"}')
+            if vis.get('key_issues'):
+                log(f'  {BO}Problemas:{N}')
+                for issue in vis['key_issues']: log(f'    • {issue}')
+            if vis.get('recommendations'):
+                log(f'  {BO}Recomendações:{N}')
+                for rec in vis['recommendations']: log(f'    • {rec}')
+        else:
+            log(f'  {Y}⚠️ Crítica visual indisponível (falha na captura ou API){N}')
+
+    # ── [9] Executive Summary ──
     results = dict(domain=domain, registration=r, dns=d, subdomains=s, stack=st, ai=ai,
-                   performance=dict(mobile=perf_m, desktop=perf_d))
+                   performance=dict(mobile=perf_m, desktop=perf_d),
+                   impeccable=imp if imp else None,
+                   visual_critique=vis if vis else None)
     _print_summary(results, log)
 
-    # ── [8] Reports ──
-    log(f'\n{BO}{B}═══ [7] REPORT ═══{N}')
+    # ── [10] Reports ──
+    log(f'\n{BO}{B}═══ [10] REPORT ═══{N}')
     _build_json(results, domain, out_json, log)
     out_txt.write_text('\n'.join(out_lines))
     log(f'  {G}TXT:{N}  {out_txt}')
@@ -430,7 +564,7 @@ async def _scan(domain_raw: str, batch: bool = False) -> dict:
     log(f'{BO}╚{"═"*50}╝{N}')
     return results
 
-async def scan_all(domains: list[str]):
+async def scan_all(domains: list[str], visual: bool = False):
     """Run parallel scans for multiple domains, show aggregate summary."""
     from time import time
     t0 = time()
@@ -439,7 +573,7 @@ async def scan_all(domains: list[str]):
     log(f'{BO}║  PENTEFINO — BATCH SCAN: {len(domains)} domínios{N}')
     log(f'{BO}╚{"═"*50}╝{N}')
 
-    results = await asyncio.gather(*[scan(d, batch=True) for d in domains])
+    results = await asyncio.gather(*[scan(d, batch=True, visual=visual) for d in domains])
 
     ok = sum(1 for r in results if r)
     elapsed = time() - t0
@@ -454,13 +588,16 @@ async def scan_all(domains: list[str]):
     return results
 
 def main():
-    if len(sys.argv) < 2:
-        print(f'Usage: {sys.argv[0]} <domain> [domain2 ...]', file=sys.stderr); sys.exit(1)
-    domains = sys.argv[1:]
-    if len(domains) == 1:
-        asyncio.run(scan(domains[0]))
+    parser = argparse.ArgumentParser(prog='pentefino.py',
+        description='pentefino — OSINT + recon + perf + visual critique scanner')
+    parser.add_argument('domains', nargs='+', help='domain(s) to scan')
+    parser.add_argument('--visual-critique', '-v', action='store_true',
+        help='enable visual design critique via Gemini Vision (full-page screenshot)')
+    args = parser.parse_args()
+    if len(args.domains) == 1:
+        asyncio.run(scan(args.domains[0], visual=args.visual_critique))
     else:
-        asyncio.run(scan_all(domains))
+        asyncio.run(scan_all(args.domains, visual=args.visual_critique))
 
 if __name__ == '__main__':
     main()
