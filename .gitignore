@@ -4,3 +4,7 @@ report_*/
 .codex/
 .omc/
 .impeccable/
+.ruff_cache/
+.venv/
+*.egg-info/
+dist/
