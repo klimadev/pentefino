@@ -27,7 +27,7 @@ jobs:
         run: |
           URL=$(gh api repos/orhun/git-cliff/releases/latest \
             --jq '.assets[] | select(.name | test("x86_64-unknown-linux-gnu.tar.gz$")) | .browser_download_url')
-          curl -LsSf "$URL" | tar xzf - -C /usr/local/bin
+          curl -LsSf "$URL" | tar xzf - --strip-components=1 -C /usr/local/bin
       - name: Generate changelog
         run: |
           git-cliff --config cliff.toml --strip header --output CHANGELOG.md
