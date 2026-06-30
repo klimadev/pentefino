@@ -23,8 +23,9 @@ jobs:
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
       - name: Install git-cliff
         run: |
-          curl -LsSf https://github.com/orhun/git-cliff/releases/latest/download/git-cliff-x86_64-unknown-linux-gnu.tar.gz \
-            | tar xzf - -C /usr/local/bin
+          URL=$(gh api repos/orhun/git-cliff/releases/latest \
+            --jq '.assets[] | select(.name | test("x86_64-unknown-linux-gnu.tar.gz$")) | .browser_download_url')
+          curl -LsSf "$URL" | tar xzf - -C /usr/local/bin
       - name: Generate changelog
         run: |
           git-cliff --config cliff.toml --strip header --output CHANGELOG.md
