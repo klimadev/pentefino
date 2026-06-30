@@ -1,0 +1,23 @@
+[changelog]
+header = """
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+"""
+body = """
+{% if version %}\
+## [{{ version }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+{% for commit in commits %}
+- {{ commit.message | upper_first }}{% if commit.github.username %} (@{{ commit.github.username }}){% endif %}
+{% endfor %}
+{% endfor %}
+"""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = false

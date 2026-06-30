@@ -232,6 +232,26 @@ That's it — the registry discovers it automatically.
 
 ---
 
+## 🚢 Publishing
+
+Releases are fully automated via GitHub Actions — no local build tools required.
+
+```bash
+# Bump version, tag, and push — the workflow does the rest
+./scripts/bump.sh 0.2.0
+git push origin v0.2.0
+```
+
+The workflow:
+
+1. **Changelog** — auto-generated from commits via `git-cliff`
+2. **Build** — PyInstaller produces standalone binaries for Linux, macOS, and Windows
+3. **Release** — GitHub Release created with changelog + binaries attached
+
+Downloads are available on the [Releases](https://github.com/Klimadev/pentefino/releases) page.
+
+---
+
 ## 📄 License
 
 MIT © [Klimadev](https://github.com/Klimadev)
