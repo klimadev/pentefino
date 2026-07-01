@@ -9,7 +9,7 @@ fi
 
 VERSION="$1"
 
-sed -i "s/version = \".*\"/version = \"$VERSION\"/" pyproject.toml
+sed -i '/^\[project\]/,/^\[/{s/^version = ".*"/version = "'$1'"/}' pyproject.toml
 git add pyproject.toml
 git commit -m "chore: bump to $VERSION"
 git tag "v$VERSION"

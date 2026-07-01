@@ -60,7 +60,7 @@ jobs:
           python-version: "3.12"
       - name: Install dependencies
         run: |
-          pip install -e .
+          pip install .
           pip install pyinstaller
       - name: Build with PyInstaller
         shell: bash
