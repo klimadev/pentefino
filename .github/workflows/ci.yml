@@ -19,6 +19,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install dependencies
         run: |
+          pip install .
           pip install ruff
       - name: Lint with ruff
         run: |

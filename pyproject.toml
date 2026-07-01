@@ -29,6 +29,9 @@ Homepage = "https://github.com/Klimadev/pentefino"
 Repository = "https://github.com/Klimadev/pentefino"
 Issues = "https://github.com/Klimadev/pentefino/issues"
 
+[project.dependencies]
+python-dotenv>=1.0
+
 [project.optional-dependencies]
 dev = ["ruff>=0.5", "pre-commit>=3"]
 
