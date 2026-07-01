@@ -9,6 +9,9 @@ description = "OSINT, recon, performance audit & visual critique scanner for web
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
+dependencies = [
+    "python-dotenv>=1.0",
+]
 keywords = ["osint", "recon", "performance", "lighthouse", "instagram", "security", "dns"]
 classifiers = [
   "Development Status :: 4 - Beta",
@@ -28,9 +31,6 @@ classifiers = [
 Homepage = "https://github.com/Klimadev/pentefino"
 Repository = "https://github.com/Klimadev/pentefino"
 Issues = "https://github.com/Klimadev/pentefino/issues"
-
-[project.dependencies]
-python-dotenv>=1.0
 
 [project.optional-dependencies]
 dev = ["ruff>=0.5", "pre-commit>=3"]
