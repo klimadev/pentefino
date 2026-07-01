@@ -15,6 +15,33 @@ from pentefino import ai as pentefino_ai
 from pentefino.formatter import BO, B, G, N, R, Y, print_lighthouse
 from pentefino.runner import curl, curl_head, run, sh
 
+# ── prompt constants ──────────────────────────────────────────
+
+VISUAL_CRITIQUE_PROMPT = (
+    "You are a senior UI/UX design critic. Analyze this full-page website screenshot.\n"
+    "Return ONLY a valid JSON object:\n"
+    "{\n"
+    '  "design_quality": <integer 1-10>,\n'
+    '  "layout": "detailed layout critique — spacing, alignment, visual hierarchy, '
+    'use of whitespace, responsive behavior",\n'
+    '  "colors": "color palette critique — contrast, WCAG accessibility, brand alignment, visual appeal",\n'
+    '  "typography": "font choices, readability, hierarchy, line lengths, sizing",\n'
+    '  "consistency": "visual consistency — reusable components, spacing rhythm, brand coherence",\n'
+    '  "mobile_friendly": true/false,\n'
+    '  "issues_found": <integer count>,\n'
+    '  "key_issues": ["specific issue 1", "specific issue 2", ...],\n'
+    '  "recommendations": ["specific actionable fix 1", "specific actionable fix 2", ...]\n'
+    "}\n"
+    "RUBRIC for design_quality:\n"
+    "1-3: Severe usability/visual problems — broken layout, poor contrast, no hierarchy\n"
+    "4-6: Major issues — inconsistent spacing, weak visual hierarchy, accessibility gaps\n"
+    "7-8: Minor issues — decent foundation with room for polish in spacing/contrast/details\n"
+    "9-10: Polished — clean hierarchy, strong brand coherence, accessible, intentional spacing\n"
+    "Heuristics: Nielsen's usability heuristics (consistency, error prevention, recognition), "
+    "Gestalt principles (proximity, similarity, closure), WCAG contrast minimums.\n"
+    "Be honest, critical, and specific. Reference concrete visual elements."
+)
+
 # ── scan functions ─────────────────────────────────────────────
 
 
@@ -234,22 +261,7 @@ async def scan_visual(domain: str, tmpdir: Path, log=print) -> dict | None:
         log(f"  {Y}⚠️ Screenshot failed: {e}{N}")
         return None
 
-    prompt = (
-        "You are a senior UI/UX design critic. Analyze this full-page website screenshot.\n"
-        "Return ONLY a valid JSON object:\n"
-        "{\n"
-        '  "design_quality": <1-10 integer>,\n'
-        '  "layout": "detailed layout critique — spacing, alignment, visual hierarchy, use of whitespace",\n'
-        '  "colors": "color palette critique — contrast, accessibility, brand alignment, visual appeal",\n'
-        '  "typography": "font choices, readability, hierarchy, line lengths, sizing",\n'
-        '  "consistency": "visual consistency — reusable components, spacing rhythm, brand coherence",\n'
-        '  "mobile_friendly": true/false,\n'
-        '  "issues_found": <integer count>,\n'
-        '  "key_issues": ["specific issue 1", "specific issue 2", ...],\n'
-        '  "recommendations": ["specific actionable fix 1", "specific actionable fix 2", ...]\n'
-        "}\n"
-        "Be honest, critical, and specific. Reference concrete visual elements."
-    )
+    prompt = VISUAL_CRITIQUE_PROMPT
     try:
         img_bytes = out.read_bytes()
         result = await pentefino_ai.analyze_image(img_bytes, prompt)

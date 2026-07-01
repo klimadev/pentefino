@@ -8,16 +8,28 @@ from pathlib import Path
 from pentefino import ai as pentefino_ai
 from pentefino.formatter import BO, G, N, R, Y
 
-DEFAULT_PROMPT = (
+SOCIAL_CRITIQUE_PROMPT = (
     "You are a senior social-media design critic. "
-    "Analyze this Instagram profile screenshot and return a JSON with:\n"
-    "  - profile_quality: 1-10 integer\n"
-    "  - visual_identity: 'description of branding consistency, colors, vibe'\n"
-    "  - content_strategy: 'what the content mix looks like, posting patterns'\n"
-    "  - engagement_signals: 'bio link strategy, highlights, story engagement cues'\n"
-    "  - improvements: ['list', 'of', 'actionable', 'tips']\n"
-    "  - overall_vibe: 'one sentence summary'\n"
-    "Return ONLY valid JSON, no markdown."
+    "Analyze this Instagram profile screenshot for visual branding and content strategy.\n"
+    "Return ONLY valid JSON:\n"
+    "{\n"
+    '  "profile_quality": <integer 1-10>,\n'
+    '  "visual_identity": "branding consistency, color palette cohesion, grid coherence, aesthetic vibe",\n'
+    '  "content_strategy": "content mix, storytelling, posting patterns, thematic consistency",\n'
+    '  "engagement_signals": "bio link strategy, highlights organization, CTA effectiveness, story engagement cues",\n'
+    '  "overall_vibe": "one sentence summary of the profile feel and positioning",\n'
+    '  "issues_found": <integer count>,\n'
+    '  "key_issues": ["specific issue 1", "specific issue 2", ...],\n'
+    '  "improvements": ["specific actionable tip 1", "specific actionable tip 2", ...]\n'
+    "}\n"
+    "RUBRIC for profile_quality:\n"
+    "1-3: Unprofessional — inconsistent branding, chaotic grid, no content strategy\n"
+    "4-6: Average — some brand coherence but weak grid, inconsistent posting, weak CTAs\n"
+    "7-8: Good — cohesive branding, organized grid, clear content strategy with minor gaps\n"
+    "9-10: Excellent — distinctive brand identity, intentional grid storytelling, strong engagement UX\n"
+    "Heuristics: visual branding consistency, grid storytelling, bio-to-content alignment, "
+    "highlight architecture, CTA clarity.\n"
+    "Be specific. Reference what you see in the profile."
 )
 
 
@@ -93,7 +105,7 @@ async def scan(target: str, prompt: str | None = None, opts: dict | None = None)
 
     # AI Analysis
     log(f"\n{BO}🤖 Analisando com IA...{N}")
-    active_prompt = prompt or DEFAULT_PROMPT
+    active_prompt = prompt or SOCIAL_CRITIQUE_PROMPT
     try:
         img_bytes = screenshot_path.read_bytes()
         analysis = await pentefino_ai.analyze_image(img_bytes, active_prompt)

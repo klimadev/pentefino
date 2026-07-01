@@ -4,6 +4,10 @@ import json
 import os
 import re
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 def get_client():
     """Return genai.Client using GEMINI_API_KEY env var."""
@@ -37,18 +41,5 @@ async def analyze_image(image_bytes: bytes, prompt: str, model: str | None = Non
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
         return json.loads(text)
-    except Exception:
-        return None
-
-
-async def analyze_html(system_prompt: str, html: str, model: str | None = None) -> dict | None:
-    """Analyze HTML content via Gemini, return parsed JSON."""
-    try:
-        client = get_client()
-        response = client.models.generate_content(
-            model=model or _DEFAULT_MODEL,
-            contents=[f"{system_prompt}\n\n{html[:50000]}"],
-        )
-        return json.loads(response.text.strip())
     except Exception:
         return None
